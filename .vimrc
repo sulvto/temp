@@ -16,7 +16,7 @@ Plugin 'plasticboy/vim-markdown'
 Plugin 'suan/vim-instant-markdown'
 Plugin 'kien/ctrlp.vim'
 Plugin 'scrooloose/nerdtree'
-
+Plugin 'git://github.com/altercation/vim-colors-solarized.git'
 
 " All of your Plugins must be added before the following line
 call vundle#end()            " required
@@ -27,3 +27,9 @@ map <C-n> :NERDTreeToggle<CR>
 map <C-f> :NERDTreeFind<CR>
 autocmd bufenter * if (winnr("$") == 1 && exists("b:NERDTree") && b:NERDTree.isTabTree()) | q | endif
 
+" solarized config
+syntax enable
+" set background=light
+set background=dark
+colorscheme solarized
+call togglebg#map("<F5>")
