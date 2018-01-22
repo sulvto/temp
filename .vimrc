@@ -17,6 +17,7 @@ Plugin 'suan/vim-instant-markdown'
 Plugin 'kien/ctrlp.vim'
 Plugin 'scrooloose/nerdtree'
 Plugin 'git://github.com/altercation/vim-colors-solarized.git'
+Plugin 'bling/vim-airline'
 
 " All of your Plugins must be added before the following line
 call vundle#end()            " required
