@@ -1,12 +1,18 @@
-#include "llvm/ADT/STLExtras.h"
+#include "llvm/DerivedTypes.h"
+#include "llvm/IRBuilder.h"
+#include "llvm/LLVMContext.h"
+#include "llvm/Module.h"
+#include "llvm/Analysis/Verifier.h"
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
-#include <memcry>
+#include <memory>
 #include <string>
 #include <vector>
+
+using namespace llvm;
 
 
 
@@ -24,7 +30,7 @@ enum Token {
 
 	// primary
 	tok_identifier = -4,
-	tok_number = -5;
+	tok_number = -5
 };
 
 static std::string IdentifierStr;	// Filled in if tok_identifier
@@ -89,12 +95,11 @@ static int gettok() {
 // Abstract Syntax Tree
 //===-------------------------------===
 
-namespace {
-
 // ExprAST -Base class for all expression nodes.
 class ExprAST {
 public:
-	virtual ~ExprAST() = default;
+	virtual ~ExprAST() {};
+	virtual Value *Codegen() = 0;
 };
 
 // NumberExprAST -Expression class for numberic literals like "1.0"
@@ -103,6 +108,7 @@ class NumberExprAST : public ExprAST {
 
 public:
 	NumberExprAST(double Val): Val(Val) {}
+	virtual Value *Codegen();
 };
 
 // VariableExprAST -Expression class for referencing a variable,like "a".
@@ -111,6 +117,7 @@ class VariableExprAST : public ExprAST {
 
 public:
 	VariableExprAST(const std::string &Name) : Name(Name) {}
+	virtual Value *Codegen();
 };
 
 // BrinaryExprAST -Expression class for a brinary operator.
@@ -122,6 +129,7 @@ public:
 	BrinaryExprAST(char Op, std::unique_ptr<ExprAST> LHS,
 					std::unique_ptr<ExprAST> RHS)
 			: Op(Op), LHS(std::move(LHS)), RHS(std::move(RHS)) {}
+	virtual Value *Codegen();
 };
 
 // CallExprAST -Expression class for function calls.
@@ -133,6 +141,7 @@ public:
 	CallExprAST(const std::string &Callee,
 					std::vector<std::unique_ptr<ExprAST>> Args)
 			: Callee(Callee), Args(std::move(Args)) {}
+	virtual Value *Codegen();
 };
 
 // PrototypeAST -This class repesents the "prototype" for a function,
@@ -146,27 +155,30 @@ public:
 	PrototypeAST(const std::string &Name, std::vector<std::string> Args) 
 			:Name(Name), Args(std::move(Args)) {}
 
+	Function *Codegen();
 	const std::string &getName() const { return Name; }
 };
 
-// FunctionAst -This class repesents a function definition itself.
-class FunctionAst {
+// FunctionAST -This class repesents a function definition itself.
+class FunctionAST {
 	std::unique_ptr<PrototypeAST> Proto;
 	std::unique_ptr<ExprAST> Body;
 
 public:
-	FunctionAst(std::unique_ptr<PrototypeAST> Proto,
+	FunctionAST(std::unique_ptr<PrototypeAST> Proto,
 					std::unique_ptr<ExprAST> Body)
-			:Proto(std::move(Proto), Body(std::move(Body))) {}
+			:Proto(std::move(Proto)), Body(std::move(Body)) {}
+	Function *Codegen();
 };
-
-}	// end anonymous namespace
 
 
 
 //===-------------------------------===
 // Parser
 //===-------------------------------===
+
+static std::unique_ptr<ExprAST> ParseExpression();
+static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, std::unique_ptr<ExprAST> LHS);
 
 // CurTok/getNextToken -Provide a simple token buffer, CurTok is the current
 // token the parser is looking at, getNextToken reads another token from the
@@ -228,7 +240,7 @@ static std::unique_ptr<ExprAST> ParseIdentifierExpr() {
 
 	getNextToken();	// eat identifier.
 	if (CurTok != '(') 
-		return llvm::make_unique(VariableExprAST)(IdName);
+		return llvm::make_unique<VariableExprAST>(IdName);
 	
 	// Call.
 	getNextToken();	// eat (.
@@ -249,7 +261,7 @@ static std::unique_ptr<ExprAST> ParseIdentifierExpr() {
 
 	getNextToken();	// eat ).
 
-	return llvm::make_unique<CallExpeAST>(IdName, std::move(Args));
+	return llvm::make_unique<CallExprAST>(IdName, std::move(Args));
 }
 
 // primary
@@ -325,7 +337,7 @@ static std::unique_ptr<PrototypeAST> ParsePrototype() {
 		return LogErrorP("Expected '(' in prototype");
 
 	// Read the list of argument names.
-	std::vector<Std::string> ArgNames;
+	std::vector<std::string> ArgNames;
 	while (getNextToken() == tok_identifier) 
 		ArgNames.push_back(IdentifierStr);
 	if (CurTok != ')')
@@ -338,13 +350,13 @@ static std::unique_ptr<PrototypeAST> ParsePrototype() {
 }
 
 // definition ::= 'def' prototype expression
-static std::unique_ptr<FunctionAst> ParseDefinition() {
+static std::unique_ptr<FunctionAST> ParseDefinition() {
 	getNextToken();	// eat def.
 	auto Proto = ParsePrototype();
 	if (!Proto) return nullptr;
 
 	if (auto E = ParseExpression())
-		return llvm::make_unique<FunctionAst>(std::move(Proto), std::move(E));
+		return llvm::make_unique<FunctionAST>(std::move(Proto), std::move(E));
 
 	return nullptr;
 }
@@ -356,15 +368,136 @@ static std::unique_ptr<PrototypeAST> ParseExtern() {
 }
 
 // toplevelexpr ::= expression
-static std::unique_ptr<FunctionAst> ParseTopLevelExpr() {
+static std::unique_ptr<FunctionAST> ParseTopLevelExpr() {
 	if (auto E = ParseExpression()) {
 		// Make an anonymous proto.
 		auto Proto = llvm::make_unique<PrototypeAST>("__anon_expr", std::vector<std::string>());
-		return llvm::make_unique<FunctionAst>(std::move(Proto), std::move(E));
+		return llvm::make_unique<FunctionAST>(std::move(Proto), std::move(E));
 	}
 
 	return nullptr;
 }
+
+
+
+//===-------------------------------===
+// Code Generation
+//===-------------------------------===
+
+// static LLVMContext TheContext;
+static Module *TheModule;
+static IRBuilder<> Builder(getGlobalContext());
+static std::map<std::string, Value *> NamedValues;
+
+Value *LogErrorV(const char *Str) { LogError(Str); return nullptr; }
+
+Function *LogErrorF(const char *Str) { LogError(Str); return nullptr; }
+
+Value *NumberExprAST::Codegen() {
+	return ConstantFP::get(getGlobalContext(), APFloat(Val));
+}
+
+Value *VariableExprAST::Codegen() {
+	// Lock this variable up in the function
+	Value * V = NamedValues[Name];
+	return V ? V : ErrorV("Unknown variable name");
+}
+
+Value *BinopPrecedence::Codegen() {
+	Value *L = LHS->Codegen();
+	Value *R = RHS->Codegen();
+
+	if (L == 0 || R == 0) return 0;
+
+	switch (Op) {
+		case '+': return Builder.CreateFAdd(L, R, "addtmp");
+		case '-': return Builder.CreateFSub(L, R, "subtmp");
+		case '*': return Builder.CreateFMul(L, R, "multmp");
+		case '<': 
+			L = Builder.CreateCmpULT(L, R, "cmptmp");
+			// Convert bool 0/1 to double 0.0 or 1.0
+			return Builder.CreateUIToFP(L, Type::getDoubleTy(getGlobalContext()), "booltmp");
+		default: return ErrorV("invalid binary operator");
+	}
+}
+
+Value *CallExprAST::Codegen() {
+	// Lock up the name in the global module table.
+	Function *CalleeF = TheModule->getFunction(Callee);
+	if (CalleeF == 0) return ErrorV("Unknown function referenced");
+	
+	// If argument mismatch error.
+	if (CalleeF->arg_size() != Args.size()) 
+		return ErrorV("Incorrect # arguments passed");
+	
+	std::vector<Value*> ArgsV;
+	for (unsigned i = 0,e = Args.size(); i != e; ++1) {
+		ArgsV.push_back(Args[i]->Codegen());
+		if (ArgsV.back() == 0) return 0;
+	}
+
+	return Builder.CreateCall(CalleeF， ArgsV, "calltmp");
+}
+
+Function *PrototypeAST::Codegen() {
+	// Make the function type: double (double, doubel)etc.
+	std::vector<Type*> Doubles(Args.size(),
+						Type::getDoubleTy(getGlobalContext()));
+	FunctionType *FT = FunctionType::get(Type::getDoubleTy(getGlobalContext()),
+						Doubles, false);
+
+	Function *F = Function::Ctrate(FT, Function::ExternalLinkage, Name, TheModule);
+
+	// If F conflicted, there was already someting named 'Name'. If it has a
+	// body, dont't allow redefinition or reextern.
+	if (F->getName() != Name) {
+		// Delete the one we just made and get the existing one.
+		F->eraseFromParent();
+		F = TheModule->getFunction(Name);
+	}
+
+	// If F already has a body, reject this.
+	if (!F->empty()) {
+		ErrorF("redefinition of function");
+		retrun 0;
+	}
+
+	// If F took a different number of args, reject.
+	if (F->arg_size() != Args.size()) {
+		ErrorF("redefinition of function with ifferent # args");
+	}
+
+	// Set names for all arguments.
+	unsigned Idx = 0;
+	for (Function::arg_iterator AI = F->arg_begin(); Idx != Args.size(); 
+					++AI, ++Idx) {
+		AI->setName(Args[Idx]);
+
+		// Add arguments to variable symbol table.
+		NamedValues[Args[Idx]] = AI;
+	}
+}
+
+Function *FunctionAST::Codegen() {
+	NamedValues.clear();
+	Function *TheFunction = Proto->Codegen();
+	if (TheFunction == 0) return 0;
+
+	// Creat a new basic block to start insertion into.
+	BasicBlock *BB = BasicBlock::Create(getGlobalContext(), 'entry', TheFunction);
+	Builder.SetInsertPoint(BB);
+	if (Value *RetVal = Body->Codegen()) {
+		// Finish off the function
+		Builder.CreateRet(RetVal);
+
+		// Validate the generated code, checking for consis tency.
+		verifyFunction(*TheFunction);
+
+		return TheFunction;
+	}
+}
+
+
 
 
 
@@ -415,6 +548,7 @@ static void MainLoop() {
 				break;
 			case tok_extern:
 				HandleExtern();
+				break;
 			default:
 				HandleTopLevelExpression();
 				break;
