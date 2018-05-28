@@ -21,6 +21,11 @@
 using namespace llvm;
 
 
+static std::unique_ptr<KaleidoscopeJIT> TheJIT;
+
+
+
+
 
 //===-------------------------------===
 // Lexer
@@ -511,6 +516,9 @@ Function *FunctionAST::Codegen() {
 		// Validate the generated code, checking for consis tency.
 		verifyFunction(*TheFunction);
 
+		// Optimize the function.
+		TheFPM->fun(*TheFunction);
+
 		return TheFunction;
 	}
 
@@ -554,9 +562,22 @@ static void HandleTopLevelExpression() {
 	// Evaluate a tope-level expression into an anonymous function.
 	if (auto FnAST = ParseTopLevelExpr()) {
 			if (auto *FnIR = FnAST->Codegen()) {
+				// JIT the module containing the anonymous expression, keeping a handle so
+				// wo can free it later
+				auto H = TheJIT->addModule(std::move(TheModule));
+				InitializeModuleAndPassManager();
+
+				// Search the JIT for the __anon_expr symbol.
+				auto ExprSymbol = TheJIT->findSymbol("__anon_expr");
+				assert(ExprSymbol && "Function not found");
+
+				// Get the symbol's address and cast it to the right type (takes no
+				// arguments, returns a double) so we can call it as a native function.
+				double (*FP)() = (double (*)())(initptr_t)ExprSymbol.getAddress();
 				fprintf(stderr, "Read top-level expression:");
-				FnIR->dump();
-				fprintf(stderr, "\n");
+
+				// Delete the anonymous exression module from the JIT.
+				TheJIT->removeModule(H);
 			}
 	} else {
 		// Skip token for error recovery.
@@ -587,9 +608,35 @@ static void MainLoop() {
 	}
 }
 
+void InitializeModuleAndPassManager(void) {
+	// Open a new module
+	TheModule = llvm::make_unique<Module>("my cool jit", TheContext);
+	TheModule->setDataLayout(TheJIT->getTargetMachine().createDataLayout());
+
+	// Create a new pass manager attached to it.
+	TheFPM = llvm::make_unique<FunctionPassManager>(TheModule.get());
+
+	// Do simple 'peephile' optimizations and bit-twiddling optzns.
+	TheFPM->add(createInstructionCombiningPass());
+	// Reassociate expression.
+	TheFPM->add(createReassociatePass());
+	// Eliminate Common SubExpressions.
+	TheFPM->add(createGVNPass());
+	// Simplify the contrcl flow graph (deleting unreachable blocks, etc).
+	TheFPM->add(createCFGSimplificationPass());
+
+	TheFPM->doInitializtion();
+}
+
+
 
 // clang++ -g -O3 toy.cpp `llvm-config --cxxflags --ldflags --system-libs --libs core` -o toy 
 int main() {
+	InitializeNativeTarget();
+	InitializeNativeAsmPrinter();
+	InitializeNativeAsmParser();
+	
+
 	// Install stanard binary operators.
 	// 1 is lower precedence,
 	BincpPrecedence['<'] = 10;
@@ -601,6 +648,8 @@ int main() {
 	fprintf(stderr, "ready> ");
 	getNextToken();
 
+	TheJIT = llvm::make_unique<KaleidoscopeJIT>();
+	
 	// Make the module, which hilds all the code.
 	TheModule = new Module("my cool jit", TheContext);
 
